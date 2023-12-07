@@ -9,13 +9,13 @@ import spotipy
 
 SPOTIFY_SECRETS_FILE_NAME = 'spotify_secrets.json'
 
-AUDIO_KINDS = {
+ITUNES_AUDIO_KINDS = {
     'AAC audio file',
     'MPEG audio file',
     'Purchased AAC audio file',
 }
 
-VIDEO_KINDS = {
+ITUNES_VIDEO_KINDS = {
     'MPEG-4 video file',
     'Protected MPEG-4 video file',
     'Purchased MPEG-4 video file',
@@ -32,15 +32,75 @@ def warn(msg):
     print(f'WARNING: {msg}')
 
 
+def debug(msg):
+    print(f'DEBUG: {msg}')
+    pass
+
+
 info = print
 
 
-def debug(msg):
-    print(f'DEBUG: {msg}')
+def chunked(items, max_chunk_size):
+    index = 0
+    while index < len(items):
+        yield items[index : index + max_chunk_size]
+        index += max_chunk_size
 
 
-# def debug(msg):
-#     pass
+def simplify_album_name(album):
+    match = re.search(r'(?P<album>.*) \(?Dis[ck] \d+\)?', album)
+    if match:
+        return match['album'].rstrip()
+    match = re.search(r'(?P<album>.*) \(?Volume \d+\)?', album)
+    if match:
+        return match['album'].rstrip()
+    return album
+
+
+def simplify_artist_name(artist):
+    return artist.replace("'", "")
+
+
+def dump(data):
+    with open('c:/t/json.json', 'w') as fp:
+        json.dump(data, fp, indent=2)
+    debug(data)
+
+
+################################################################################
+# iTunes
+
+
+def iter_itunes_tracks(library_path):
+    with open(library_path, mode='rb') as fp:
+        library = plistlib.load(fp, fmt=plistlib.FMT_XML)
+    tracks = library.get('Tracks', {})
+    debug(f'Loaded {len(tracks)} tracks from "{library_path}"')
+
+    for track_id, track in sorted(tracks.items()):
+        if track.get('Track Type') != 'File':
+            debug(f'skipping track {track_id}, not a file')
+            continue
+        kind = track.get('Kind')
+        if kind in ITUNES_VIDEO_KINDS:
+            debug(f'skipping track {track_id}, is a video')
+            continue
+        assert kind in ITUNES_AUDIO_KINDS
+        if track.get('Genre') == 'Podcast':
+            debug(f'skipping track {track_id}, is a podcast')
+            continue
+
+        yield {
+            'album': track.get('Album'),
+            'album_artist': track.get('Album Artist'),
+            'artist': track.get('Artist'),
+            'rating': track.get('Album Rating'),
+            'title': track.get('Name'),
+        }
+
+
+################################################################################
+# Spotify
 
 
 def authenticate(scopes=None):
@@ -60,69 +120,39 @@ def authenticate(scopes=None):
         env_key = 'SPOTIPY_' + key.upper()
         os.environ[env_key] = value
 
-    # creds = spotipy.oauth2.SpotifyClientCredentials(
-    #     # cache_handler=spotipy.cache_handler.CacheFileHandler(cache_path='.spotipy_auth_cache')
-    #     cache_handler=spotipy.cache_handler.MemoryCacheHandler()
-    # )
-    # client = spotipy.Spotify(client_credentials_manager=creds)
+    cache_root_path = '.'
+    kwargs = {}
+    if scopes:
+        cache_path = os.path.join(cache_root_path, '.spotipy_user_auth_cache')
+        cache_handler = spotipy.cache_handler.CacheFileHandler(cache_path=cache_path)
+        auth_manager = spotipy.oauth2.SpotifyOAuth(scope=scopes, cache_handler=cache_handler)
+        kwargs = dict(auth_manager=auth_manager)
+    else:
+        cache_path = os.path.join(cache_root_path, '.spotipy_auth_cache')
+        cache_handler = spotipy.cache_handler.CacheFileHandler(cache_path=cache_path)
+        cred_manager = spotipy.oauth2.SpotifyClientCredentials(cache_handler=cache_handler)
+        kwargs = dict(client_credentials_manager=cred_manager)
 
-    client = spotipy.Spotify(auth_manager=spotipy.oauth2.SpotifyOAuth(scope=scopes))
-
+    client = spotipy.Spotify(**kwargs)
     return client
 
 
-def iter_itunes_tracks(library_path):
-    with open(library_path, mode='rb') as fp:
-        library = plistlib.load(fp, fmt=plistlib.FMT_XML)
-    tracks = library.get('Tracks', {})
-    debug(f'Loaded {len(tracks)} tracks from "{library_path}"')
-
-    for track_id, track in sorted(tracks.items()):
-        if track.get('Track Type') != 'File':
-            debug(f'skipping track {track_id}, not a file')
-            continue
-        kind = track.get('Kind')
-        if kind in VIDEO_KINDS:
-            debug(f'skipping track {track_id}, is a video')
-            continue
-        assert kind in AUDIO_KINDS
-        if track.get('Genre') == 'Podcast':
-            debug(f'skipping track {track_id}, is a podcast')
-            continue
-
-        yield {
-            'album': track.get('Album'),
-            'album_artist': track.get('Album Artist'),
-            'artist': track.get('Artist'),
-            'rating': track.get('Album Rating'),
-            'title': track.get('Name'),
-        }
+def iter_paged_items(client, results):
+    while True:
+        for item in results['items']:
+            yield item
+        if results['next']:
+            results = client.next(results)
+        else:
+            break
 
 
-def simplify_album_name(album):
-    match = re.search(r'(?P<album>.*) \(?Dis[ck] \d+\)?', album)
-    if match:
-        return match['album'].rstrip()
-    match = re.search(r'(?P<album>.*) \(?Volume \d+\)?', album)
-    if match:
-        return match['album'].rstrip()
-    return album
-
-
-def simplify_artist_name(artist):
-    return artist.replace("'", "")
-
-
-def test_spotipy(client):
-    birdy_uri = 'spotify:artist:2WX2uTcsvV5OnS0inACecP'
-    results = client.artist_albums(birdy_uri, album_type='album')
-    albums = results['items']
-    while results['next']:
-        results = client.next(results)
-        albums.extend(results['items'])
-
-    for album in albums:
-        print(album['name'])
+def get_or_create_playlist(client, user_id, playlist_name):
+    results = client.user_playlists(user_id)
+    for playlist in iter_paged_items(client, results):
+        if playlist.get('name') == playlist_name:
+            return playlist
+    return client.user_playlist_create(user_id, playlist_name)
 
 
 def test_find_albums():
@@ -143,10 +173,6 @@ def test_find_albums():
             continue
         searched_queries.add(query)
         result = client.search(q=query, type='album')
-        # with open('c:/t/json.json', 'w') as fp:
-        #     json.dump(result, fp, indent=2)
-        # debug(result)
-
         items = result.get('albums', {}).get('items')
         if items:
             album = items[0]
@@ -180,11 +206,6 @@ def test_find_artists():
             if query in searched_queries:
                 continue
             searched_queries.add(query)
-            result = client.search(q=query, type='artist')
-            # with open('c:/t/json.json', 'w') as fp:
-            #     json.dump(result, fp, indent=2)
-            # debug(result)
-
             items = result.get('artists', {}).get('items')
             if items:
                 artist = items[0]
@@ -200,8 +221,59 @@ def test_find_artists():
         json.dump(data, fp, indent=2)
 
 
+def test_make_playlist():
+    client = authenticate(scopes=['playlist-modify-public'])
+    user = client.current_user()
+    user_id = user.get('id') if user else None
+
+    with open('albums.json') as fp:
+        data = json.load(fp)
+    album_uris = data.get('found_album_uris', [])
+
+    playlist_base_name = 'iTunes Import'
+    playlist_count = 1
+    playlist = get_or_create_playlist(client, user_id, playlist_base_name)
+    for ii, album_uri in enumerate(album_uris):
+        last_playlist_count = playlist_count
+        debug(f'Adding album {ii + 1} of {len(album_uris)} ({album_uri})')
+        result = client.album_tracks(album_uri)
+        all_album_tracks = [track['uri'] for track in iter_paged_items(client, result)]
+        for album_tracks in chunked(all_album_tracks, 100):
+            while True:
+                try:
+                    client.playlist_add_items(playlist['id'], album_tracks)
+                    break
+                except spotipy.SpotifyException as ex:
+                    if (
+                        ex.http_status == 400
+                        and 'Playlist size limit reached.' in ex.msg
+                        and last_playlist_count == playlist_count
+                    ):
+                        playlist_count += 1
+                        playlist = get_or_create_playlist(
+                            client, user_id, f'{playlist_base_name} {playlist_count}'
+                        )
+                        continue
+                    else:
+                        raise
+
+
+def test_save_albums():
+    with open('albums.json') as fp:
+        data = json.load(fp)
+    album_uris = data.get('found_album_uris', [])
+
+    client = authenticate(scopes=['user-library-read', 'user-library-modify'])
+    chunk_size = 20  # per Spotify docs
+    for chunk_index, album_uris_chunk in enumerate(chunked(album_uris, chunk_size)):
+        start_index = chunk_index * chunk_size + 1
+        end_index = chunk_index * chunk_size + chunk_size
+        info(f'Adding albums {start_index} - {end_index}...')
+        client.current_user_saved_albums_add(album_uris_chunk)
+
+
 if __name__ == '__main__':
     try:
-        test_find_artists()
+        test_save_albums()
     except KeyboardInterrupt:
         pass

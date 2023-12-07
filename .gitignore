@@ -1,4 +1,7 @@
 env/
 .cache
 .spotipy_auth_cache
+.spotipy_user_auth_cache
+spotify_albums.json
+spotify_artists.json
 spotify_secrets.json

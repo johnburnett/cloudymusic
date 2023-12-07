@@ -8,13 +8,13 @@ import spotipy
 
 
 SPOTIFY_SECRETS_FILE_NAME = 'spotify_secrets.json'
+SPOTIFY_MAX_PLAYLIST_COUNT = 10_000
 
 ITUNES_AUDIO_KINDS = {
     'AAC audio file',
     'MPEG audio file',
     'Purchased AAC audio file',
 }
-
 ITUNES_VIDEO_KINDS = {
     'MPEG-4 video file',
     'Protected MPEG-4 video file',
@@ -147,14 +147,6 @@ def iter_paged_items(client, results):
             break
 
 
-def get_or_create_playlist(client, user_id, playlist_name):
-    results = client.user_playlists(user_id)
-    for playlist in iter_paged_items(client, results):
-        if playlist.get('name') == playlist_name:
-            return playlist
-    return client.user_playlist_create(user_id, playlist_name)
-
-
 def test_find_albums():
     library_path = os.path.join(os.getenv("USERPROFILE"), "Music/iTunes/iTunes Music Library.xml")
 
@@ -187,7 +179,7 @@ def test_find_albums():
             warn(f'No album found named "{album}" for artist "{album_artist}"')
 
     data = dict(found_album_uris=found_album_uris, missing_albums=missing_albums)
-    with open('albums.json', 'w') as fp:
+    with open('spotify_albums.json', 'w') as fp:
         json.dump(data, fp, indent=2)
 
 
@@ -217,7 +209,7 @@ def test_find_artists():
                 warn(f'No artist found named "{artist_name}"')
 
     data = dict(found_artist_uris=found_artist_uris, missing_artists=missing_artists)
-    with open('artists.json', 'w') as fp:
+    with open('spotify_artists.json', 'w') as fp:
         json.dump(data, fp, indent=2)
 
 
@@ -226,40 +218,34 @@ def test_make_playlist():
     user = client.current_user()
     user_id = user.get('id') if user else None
 
-    with open('albums.json') as fp:
+    with open('spotify_albums.json') as fp:
         data = json.load(fp)
     album_uris = data.get('found_album_uris', [])
 
     playlist_base_name = 'iTunes Import'
     playlist_count = 1
-    playlist = get_or_create_playlist(client, user_id, playlist_base_name)
+    playlist_track_count = 0
+    playlist = client.user_playlist_create(user_id, playlist_base_name)
     for ii, album_uri in enumerate(album_uris):
-        last_playlist_count = playlist_count
         debug(f'Adding album {ii + 1} of {len(album_uris)} ({album_uri})')
         result = client.album_tracks(album_uri)
         all_album_tracks = [track['uri'] for track in iter_paged_items(client, result)]
+
+        assert len(all_album_tracks) <= SPOTIFY_MAX_PLAYLIST_COUNT
+        if (playlist_track_count + len(all_album_tracks)) > SPOTIFY_MAX_PLAYLIST_COUNT:
+            playlist_count += 1
+            playlist = client.user_playlist_create(
+                user_id, f'{playlist_base_name} {playlist_count}'
+            )
+            playlist_track_count = 0
+        playlist_track_count += len(all_album_tracks)
+
         for album_tracks in chunked(all_album_tracks, 100):
-            while True:
-                try:
-                    client.playlist_add_items(playlist['id'], album_tracks)
-                    break
-                except spotipy.SpotifyException as ex:
-                    if (
-                        ex.http_status == 400
-                        and 'Playlist size limit reached.' in ex.msg
-                        and last_playlist_count == playlist_count
-                    ):
-                        playlist_count += 1
-                        playlist = get_or_create_playlist(
-                            client, user_id, f'{playlist_base_name} {playlist_count}'
-                        )
-                        continue
-                    else:
-                        raise
+            client.playlist_add_items(playlist['id'], album_tracks)
 
 
 def test_save_albums():
-    with open('albums.json') as fp:
+    with open('spotify_albums.json') as fp:
         data = json.load(fp)
     album_uris = data.get('found_album_uris', [])
 

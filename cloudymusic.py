@@ -43,7 +43,7 @@ def debug(msg):
 #     pass
 
 
-def authenticate():
+def authenticate(scopes=None):
     this_dir = os.path.dirname(__file__)
     secrets_file_path = os.path.join(this_dir, SPOTIFY_SECRETS_FILE_NAME)
     with open(secrets_file_path) as fp:
@@ -60,11 +60,14 @@ def authenticate():
         env_key = 'SPOTIPY_' + key.upper()
         os.environ[env_key] = value
 
-    creds = spotipy.oauth2.SpotifyClientCredentials(
-        # cache_handler=spotipy.cache_handler.CacheFileHandler(cache_path='.spotipy_auth_cache')
-        cache_handler=spotipy.cache_handler.MemoryCacheHandler()
-    )
-    client = spotipy.Spotify(client_credentials_manager=creds)
+    # creds = spotipy.oauth2.SpotifyClientCredentials(
+    #     # cache_handler=spotipy.cache_handler.CacheFileHandler(cache_path='.spotipy_auth_cache')
+    #     cache_handler=spotipy.cache_handler.MemoryCacheHandler()
+    # )
+    # client = spotipy.Spotify(client_credentials_manager=creds)
+
+    client = spotipy.Spotify(auth_manager=spotipy.oauth2.SpotifyOAuth(scope=scopes))
+
     return client
 
 
@@ -96,7 +99,7 @@ def iter_itunes_tracks(library_path):
         }
 
 
-def strip_album_suffix(album):
+def simplify_album_name(album):
     match = re.search(r'(?P<album>.*) \(?Dis[ck] \d+\)?', album)
     if match:
         return match['album'].rstrip()
@@ -104,6 +107,10 @@ def strip_album_suffix(album):
     if match:
         return match['album'].rstrip()
     return album
+
+
+def simplify_artist_name(artist):
+    return artist.replace("'", "")
 
 
 def test_spotipy(client):
@@ -128,7 +135,7 @@ def test_find_albums():
     searched_queries = set()
     for ii, track in enumerate(iter_itunes_tracks(library_path)):
         album = track['album']
-        simplified_album = strip_album_suffix(album)
+        simplified_album = simplify_album_name(album)
         album_artist = track['album_artist']
 
         query = f'artist:{album_artist} album:{simplified_album}'
@@ -153,16 +160,48 @@ def test_find_albums():
             missing_albums.append({'album': album, 'album_artist': album_artist})
             warn(f'No album found named "{album}" for artist "{album_artist}"')
 
-        if (len(found_album_uris) + len(missing_albums)) >= 300:
-            break
-
     data = dict(found_album_uris=found_album_uris, missing_albums=missing_albums)
-    with open('C:/t/json.json', 'w') as fp:
+    with open('albums.json', 'w') as fp:
+        json.dump(data, fp, indent=2)
+
+
+def test_find_artists():
+    library_path = os.path.join(os.getenv("USERPROFILE"), "Music/iTunes/iTunes Music Library.xml")
+
+    found_artist_uris = []
+    missing_artists = []
+
+    client = authenticate()
+    searched_queries = set()
+    for ii, track in enumerate(iter_itunes_tracks(library_path)):
+        for artist_name in set((track['album_artist'], track['artist'])):
+            simplified_artist_name = simplify_artist_name(artist_name)
+            query = f'artist:{simplified_artist_name}'
+            if query in searched_queries:
+                continue
+            searched_queries.add(query)
+            result = client.search(q=query, type='artist')
+            # with open('c:/t/json.json', 'w') as fp:
+            #     json.dump(result, fp, indent=2)
+            # debug(result)
+
+            items = result.get('artists', {}).get('items')
+            if items:
+                artist = items[0]
+                artist_uri = artist['uri']
+                info(f'Found artist "{artist_name}"')
+                found_artist_uris.append(artist_uri)
+            else:
+                missing_artists.append(artist_name)
+                warn(f'No artist found named "{artist_name}"')
+
+    data = dict(found_artist_uris=found_artist_uris, missing_artists=missing_artists)
+    with open('artists.json', 'w') as fp:
         json.dump(data, fp, indent=2)
 
 
 if __name__ == '__main__':
     try:
-        test_find_albums()
+        test_find_artists()
     except KeyboardInterrupt:
         pass
